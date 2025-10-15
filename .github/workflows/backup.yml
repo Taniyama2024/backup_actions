@@ -18,6 +18,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
+
+
       - name: Dump Neon PostgreSQL database
         env:
           NEON_DB: ${{ secrets.NEON_DB }}
@@ -45,6 +47,12 @@ jobs:
           echo "Backup completed successfully: $FILE_NAME"
           echo "BACKUP_FILE=$FILE_NAME" >> $GITHUB_ENV
 
+
+      - name: Check pg_dump version
+        run: |
+          pg_dump --version
+
+
       - name: Upload backup to R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -63,6 +71,8 @@ jobs:
             --endpoint-url "$ENDPOINT"
 
           echo "Backup uploaded to R2: backups/$BACKUP_FILE"
+
+          
 
       - name: Delete old backups (older than 30 days)
         env:
