@@ -1,9 +1,9 @@
-name: Daily Neon Backup
+name: Daily Neon DB Backup to R2
 
 on:
   schedule:
-    - cron: '0 15 * * *' # 毎日24時(JST)に実行（UTC 15:00）
-  workflow_dispatch: # 手動実行も可
+    - cron: "0 3 * * *" # 毎日午前3時(JST12:00)に実行
+  workflow_dispatch: # 手動実行も可能
 
 jobs:
   backup:
@@ -13,27 +13,85 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Install PostgreSQL client & AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y awscli
 
-      - name: Dump Neon database
+      - name: Dump Neon PostgreSQL database
         env:
-          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          NEON_DB: ${{ secrets.NEON_DB }}
+          NEON_HOST: ${{ secrets.NEON_HOST }}
+          NEON_USER: ${{ secrets.NEON_USER }}
+          NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
         run: |
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-          pg_dump --no-owner --no-acl --format=custom --file=backup_$TIMESTAMP.dump "$DATABASE_URL"
+          FILE_NAME="backup_${TIMESTAMP}.sql.gz"
+          echo "Creating backup file: $FILE_NAME"
 
-      - name: Upload to Cloudflare R2
+          # Neon DBへ接続しダンプ
+          PGPASSWORD=$NEON_PASSWORD pg_dump \
+            --host=$NEON_HOST \
+            --username=$NEON_USER \
+            --dbname=$NEON_DB \
+            --no-password \
+          | gzip > $FILE_NAME
+
+          echo "Backup completed successfully: $FILE_NAME"
+          echo "BACKUP_FILE=$FILE_NAME" >> $GITHUB_ENV
+
+      - name: Upload backup to R2
         env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
-          FILE=backup_$TIMESTAMP.dump
-          aws configure set aws_access_key_id "$R2_ACCESS_KEY_ID"
-          aws configure set aws_secret_access_key "$R2_SECRET_ACCESS_KEY"
-          aws configure set default.region auto
-          aws --endpoint-url "$R2_ENDPOINT" s3 cp "$FILE" s3://"$R2_BUCKET_NAME"/backups/"$FILE"
+          export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+          export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+          export AWS_EC2_METADATA_DISABLED=true
 
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          # バックアップを "backups" フォルダにアップロード
+          aws s3 cp "$BACKUP_FILE" "s3://$R2_BUCKET/backups/$BACKUP_FILE" \
+            --endpoint-url "$ENDPOINT"
+
+          echo "Backup uploaded to R2: backups/$BACKUP_FILE"
+
+      - name: Delete old backups (older than 30 days)
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+          export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+          export AWS_EC2_METADATA_DISABLED=true
+
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          echo "Checking for old backup files to delete (older than 30 days)..."
+
+          # R2内のbackupsフォルダ内のファイルをリストアップして削除判定
+          aws s3 ls "s3://$R2_BUCKET/backups/" --endpoint-url "$ENDPOINT" | while read -r line; do
+            CREATE_DATE=$(echo $line | awk '{print $1" "$2}')
+            FILE_NAME=$(echo $line | awk '{print $4}')
+            if [ -z "$FILE_NAME" ]; then
+              continue
+            fi
+
+            FILE_DATE=$(date -d "$CREATE_DATE" +%s)
+            NOW_DATE=$(date +%s)
+            AGE_DAYS=$(( (NOW_DATE - FILE_DATE) / 86400 ))
+
+            # 30日以上前のファイルを削除
+            if [ $AGE_DAYS -gt 30 ]; then
+              echo "Deleting old backup: $FILE_NAME (age: $AGE_DAYS days)"
+              aws s3 rm "s3://$R2_BUCKET/backups/$FILE_NAME" --endpoint-url "$ENDPOINT"
+            fi
+          done
+
+          echo "Old backup cleanup completed."
