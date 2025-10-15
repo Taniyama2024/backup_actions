@@ -35,6 +35,7 @@ jobs:
             --host=$NEON_HOST \
             --username=$NEON_USER \
             --dbname=$NEON_DB \
+            --sslmode=require \
             --no-password \
           | gzip > $FILE_NAME
 
