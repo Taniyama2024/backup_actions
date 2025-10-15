@@ -13,12 +13,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client 
+      - name: Check pg_dump version
+        run: pg_dump --version
+
+      - name: Install PostgreSQL client
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
-
-
+          sudo apt-get install -y postgresql-client awscli
 
       - name: Dump Neon PostgreSQL database
         env:
@@ -27,31 +28,18 @@ jobs:
           NEON_USER: ${{ secrets.NEON_USER }}
           NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
         run: |
+          set -e
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
           FILE_NAME="backup_${TIMESTAMP}.sql.gz"
           echo "Creating backup file: $FILE_NAME"
 
-          # SSL 接続のために環境変数を設定
-          export PGPASSWORD=$NEON_PASSWORD
-          export PGSSLMODE=require
-
-          # Neon DBへ接続してダンプ
-          pg_dump \
-            --host=$NEON_HOST \
-            --username=$NEON_USER \
-            --dbname=$NEON_DB \
-            --port=5432 \
-            --no-password \
-          | gzip > $FILE_NAME
+          # ✅ 接続URI形式でSSLを含めて指定
+          PGPASSWORD=$NEON_PASSWORD pg_dump \
+            "postgresql://$NEON_USER:$NEON_PASSWORD@$NEON_HOST:5432/$NEON_DB?sslmode=require" \
+            | gzip > $FILE_NAME
 
           echo "Backup completed successfully: $FILE_NAME"
           echo "BACKUP_FILE=$FILE_NAME" >> $GITHUB_ENV
-
-
-      - name: Check pg_dump version
-        run: |
-          pg_dump --version
-
 
       - name: Upload backup to R2
         env:
@@ -60,19 +48,18 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
+          set -e
           export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
           export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
           export AWS_EC2_METADATA_DISABLED=true
 
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-          # バックアップを "backups" フォルダにアップロード
+          # R2のbackupsフォルダへアップロード
           aws s3 cp "$BACKUP_FILE" "s3://$R2_BUCKET/backups/$BACKUP_FILE" \
             --endpoint-url "$ENDPOINT"
 
           echo "Backup uploaded to R2: backups/$BACKUP_FILE"
-
-          
 
       - name: Delete old backups (older than 30 days)
         env:
@@ -81,6 +68,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
+          set -e
           export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
           export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
           export AWS_EC2_METADATA_DISABLED=true
@@ -100,7 +88,6 @@ jobs:
             NOW_DATE=$(date +%s)
             AGE_DAYS=$(( (NOW_DATE - FILE_DATE) / 86400 ))
 
-            # 30日以上前のファイルを削除
             if [ $AGE_DAYS -gt 30 ]; then
               echo "Deleting old backup: $FILE_NAME (age: $AGE_DAYS days)"
               aws s3 rm "s3://$R2_BUCKET/backups/$FILE_NAME" --endpoint-url "$ENDPOINT"
