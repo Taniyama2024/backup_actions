@@ -16,10 +16,13 @@ jobs:
       - name: Check pg_dump version
         run: pg_dump --version
 
-      - name: Install PostgreSQL client
+      - name: Install PostgreSQL client and AWS CLI (via pip)
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client awscli
+          sudo apt-get install -y postgresql-client python3-pip
+          pip install awscli --upgrade --user
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          aws --version
 
       - name: Dump Neon PostgreSQL database
         env:
@@ -33,7 +36,7 @@ jobs:
           FILE_NAME="backup_${TIMESTAMP}.sql.gz"
           echo "Creating backup file: $FILE_NAME"
 
-          # ✅ 接続URI形式でSSLを含めて指定
+          # ✅ 接続URI形式（SSL付き）
           PGPASSWORD=$NEON_PASSWORD pg_dump \
             "postgresql://$NEON_USER:$NEON_PASSWORD@$NEON_HOST:5432/$NEON_DB?sslmode=require" \
             | gzip > $FILE_NAME
@@ -59,7 +62,7 @@ jobs:
           aws s3 cp "$BACKUP_FILE" "s3://$R2_BUCKET/backups/$BACKUP_FILE" \
             --endpoint-url "$ENDPOINT"
 
-          echo "Backup uploaded to R2: backups/$BACKUP_FILE"
+          echo "✅ Backup uploaded to R2: backups/$BACKUP_FILE"
 
       - name: Delete old backups (older than 30 days)
         env:
@@ -89,7 +92,7 @@ jobs:
             AGE_DAYS=$(( (NOW_DATE - FILE_DATE) / 86400 ))
 
             if [ $AGE_DAYS -gt 30 ]; then
-              echo "Deleting old backup: $FILE_NAME (age: $AGE_DAYS days)"
+              echo "🗑️ Deleting old backup: $FILE_NAME (age: $AGE_DAYS days)"
               aws s3 rm "s3://$R2_BUCKET/backups/$FILE_NAME" --endpoint-url "$ENDPOINT"
             fi
           done
