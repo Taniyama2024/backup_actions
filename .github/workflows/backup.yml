@@ -3,7 +3,7 @@ name: Daily Neon DB Backup to R2
 on:
   schedule:
     - cron: "0 3 * * *" # 毎日午前3時(JST12:00)に実行
-  workflow_dispatch: # 手動実行も可能
+  workflow_dispatch:
 
 jobs:
   backup:
@@ -13,12 +13,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL client 
+      - name: Install PostgreSQL client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
-          
-
 
       - name: Dump Neon PostgreSQL database
         env:
@@ -27,6 +25,7 @@ jobs:
           NEON_USER: ${{ secrets.NEON_USER }}
           NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
         run: |
+          set -e
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
           FILE_NAME="backup_${TIMESTAMP}.sql.gz"
           echo "Creating backup file: $FILE_NAME"
@@ -36,9 +35,9 @@ jobs:
             --host=$NEON_HOST \
             --username=$NEON_USER \
             --dbname=$NEON_DB \
+            --port=5432 \
             --sslmode=require \
-            --no-password \
-          | gzip > $FILE_NAME
+            | gzip > $FILE_NAME
 
           echo "Backup completed successfully: $FILE_NAME"
           echo "BACKUP_FILE=$FILE_NAME" >> $GITHUB_ENV
@@ -97,3 +96,4 @@ jobs:
           done
 
           echo "Old backup cleanup completed."
+
