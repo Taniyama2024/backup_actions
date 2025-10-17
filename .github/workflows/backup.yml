@@ -2,7 +2,7 @@ name: Daily Neon DB Backup to R2
 
 on:
   schedule:
-    - cron: "0 3 * * *" # 毎日午前3時(JST12:00)に実行
+    - cron: "0 3 * * *" # 毎日午前3時(JST)に実行
   workflow_dispatch: # 手動実行も可能
 
 jobs:
@@ -13,19 +13,45 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- PostgreSQL 17 client install ---
-      - name: Install PostgreSQL 17 client
+      - name: Install dependencies (Postgres client 17 + unzip + pip)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gnupg lsb-release
+          sudo apt-get update -y
+          sudo apt-get install -y wget gnupg lsb-release unzip python3-pip
+
+          # Add PostgreSQL APT repo and install client-17
           echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-          sudo apt-get update
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo tee /etc/apt/trusted.gpg.d/pgdg.asc >/dev/null
+          sudo apt-get update -y
           sudo apt-get install -y postgresql-client-17
           pg_dump --version
 
-      # --- pg_dumpを使ってNeon DBをバックアップ ---
-      - name: Dump Neon PostgreSQL database
+      - name: Install AWS CLI (via pip user)
+        run: |
+          python3 -m pip install --upgrade --user awscli
+          # Ensure ~/.local/bin is on PATH for this runner
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          aws --version
+
+      - name: Debug: show basic env and check secrets presence
+        run: |
+          echo "Checking secret variables (names only; values hidden)"
+          if [ -z "${{ secrets.NEON_HOST }}" ]; then echo "NEON_HOST secret missing"; exit 1; fi
+          if [ -z "${{ secrets.NEON_USER }}" ]; then echo "NEON_USER secret missing"; exit 1; fi
+          if [ -z "${{ secrets.NEON_DB }}" ]; then echo "NEON_DB secret missing"; exit 1; fi
+          if [ -z "${{ secrets.NEON_PASSWORD }}" ]; then echo "NEON_PASSWORD secret missing"; exit 1; fi
+          echo "Secrets appear present. (values not printed)"
+
+      - name: PSQL connection test (will fail job if cannot connect)
+        env:
+          PGPASSWORD: ${{ secrets.NEON_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "=== psql connection test: \\conninfo ==="
+          psql "postgresql://${{ secrets.NEON_USER }}@${{ secrets.NEON_HOST }}:5432/${{ secrets.NEON_DB }}?sslmode=require" -c '\conninfo'
+          echo "=== psql list sample tables count ==="
+          psql "postgresql://${{ secrets.NEON_USER }}@${{ secrets.NEON_HOST }}:5432/${{ secrets.NEON_DB }}?sslmode=require" -c 'select count(*) from pg_catalog.pg_tables;' -t
+
+      - name: Dump Neon PostgreSQL database (gzip) and verify
         env:
           NEON_DB: ${{ secrets.NEON_DB }}
           NEON_HOST: ${{ secrets.NEON_HOST }}
@@ -33,90 +59,80 @@ jobs:
           NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
         run: |
           set -euo pipefail
-
           TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
           FILE_NAME="backup_${TIMESTAMP}.sql.gz"
-          echo "Creating backup file: $FILE_NAME"
+          echo "Creating backup file: $FILE_NAME (this will fail the job if dump fails)"
 
-          # Neon DBへダンプ
-          PGPASSWORD=$NEON_PASSWORD pg_dump \
-            --host="$NEON_HOST" \
-            --port=5432 \
-            --username="$NEON_USER" \
-            --dbname="$NEON_DB" \
-            --format=p \
-            --compress=0 \
-            --no-password \
-          | gzip > "$FILE_NAME"
+          # Use PGPASSWORD and URI without including password in logs
+          export PGPASSWORD="$NEON_PASSWORD"
+          export PGSSLMODE=require
 
-          # ファイルサイズ確認（0バイトなら失敗扱い）
+          # Run pg_dump to a plain text SQL stream then gzip it
+          pg_dump "postgresql://${NEON_USER}@${NEON_HOST}:5432/${NEON_DB}?sslmode=require" \
+            --format=p --no-password --username="${NEON_USER}" \
+            | gzip > "$FILE_NAME"
+
+          # verify file exists and non-empty
+          ls -lh "$FILE_NAME"
+          wc -c "$FILE_NAME"
+
           if [ ! -s "$FILE_NAME" ]; then
-            echo "❌ Backup file is empty. Dump failed."
+            echo "ERROR: backup file is empty or missing. Aborting."
             exit 1
           fi
 
-          echo "✅ Backup completed successfully: $FILE_NAME"
+          echo "Backup file created: $FILE_NAME"
           echo "BACKUP_FILE=$FILE_NAME" >> $GITHUB_ENV
 
-      # --- AWS CLI v2 install ---
-      - name: Install AWS CLI v2
-        run: |
-          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-          unzip -q awscliv2.zip
-          sudo ./aws/install --update
-          aws --version
-
-      # --- R2へアップロード ---
-      - name: Upload backup to R2
+      - name: Upload backup to Cloudflare R2
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          set -e
+          set -euo pipefail
+          if [ -z "${BACKUP_FILE:-}" ]; then echo "BACKUP_FILE not set"; exit 1; fi
           export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
           export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
           export AWS_EC2_METADATA_DISABLED=true
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-          aws s3 cp "$BACKUP_FILE" "s3://$R2_BUCKET/backups/$BACKUP_FILE" \
-            --endpoint-url "$ENDPOINT" \
-            --content-type "application/sql" \
-            --quiet
+          echo "Uploading $BACKUP_FILE to s3://${R2_BUCKET}/backups/"
+          aws s3 cp "$BACKUP_FILE" "s3://$R2_BUCKET/backups/$BACKUP_FILE" --endpoint-url "$ENDPOINT" --content-type "application/sql"
 
-          echo "✅ Backup uploaded to R2: backups/$BACKUP_FILE"
+          echo "Upload complete. Confirm listing:"
+          aws s3 ls "s3://$R2_BUCKET/backups/" --endpoint-url "$ENDPOINT" | tail -n 10
 
-      # --- 古いバックアップの削除（30日以上前） ---
-      - name: Delete old backups (older than 30 days)
+      - name: Delete old backups (older than 30 days) - only backups/ prefix
         env:
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
-          set -e
+          set -euo pipefail
           export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
           export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
           export AWS_EC2_METADATA_DISABLED=true
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-          echo "🧹 Checking for old backup files to delete (older than 30 days)..."
+          echo "Checking for old backup files to delete (older than 30 days)..."
+          THIRTY_DAYS_AGO=$(date -d "30 days ago" +%s)
 
           aws s3 ls "s3://$R2_BUCKET/backups/" --endpoint-url "$ENDPOINT" | while read -r line; do
+            # sample line: 2025-10-17 18:30:54       12345 backup_2025-10-17_18-30-54.sql.gz
             CREATE_DATE=$(echo "$line" | awk '{print $1" "$2}')
             FILE_NAME=$(echo "$line" | awk '{print $4}')
             if [ -z "$FILE_NAME" ]; then
               continue
             fi
             FILE_DATE=$(date -d "$CREATE_DATE" +%s)
-            NOW_DATE=$(date +%s)
-            AGE_DAYS=$(( (NOW_DATE - FILE_DATE) / 86400 ))
-
+            AGE_DAYS=$(( ( $(date +%s) - FILE_DATE ) / 86400 ))
             if [ $AGE_DAYS -gt 30 ]; then
-              echo "🗑️ Deleting old backup: $FILE_NAME (age: $AGE_DAYS days)"
+              echo "Deleting old backup: $FILE_NAME (age: $AGE_DAYS days)"
               aws s3 rm "s3://$R2_BUCKET/backups/$FILE_NAME" --endpoint-url "$ENDPOINT"
             fi
           done
 
-          echo "✅ Old backup cleanup completed."
+          echo "Old backup cleanup completed."
