@@ -117,29 +117,28 @@ jobs:
 
           echo "✅ Old backup cleanup completed."
 
-      # ---------- 通知用に表示するバックアップ名を整える ----------
-      - name: Prepare notification context
-        if: always()
+      # 通知用に表示するバックアップ名を整える（失敗時のみ）
+      - name: Prepare notification context (on failure)
+        if: failure()
         run: |
-          # BACKUP_FILE が空／未定義なら "N/A" をセット
           if [ -z "${BACKUP_FILE:-}" ]; then
             echo "NOTIFY_BACKUP_FILE=N/A" >> $GITHUB_ENV
           else
             echo "NOTIFY_BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
           fi
 
-      # ---------- 成功・失敗に関わらず通知（Gmail SMTP） ----------
-      - name: Send notification email (Gmail SMTP)
-        if: always()
+      # 失敗時のみメール送信
+      - name: Send failure notification email (Gmail SMTP)
+        if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
           username: ${{ secrets.ALERT_EMAIL_USERNAME }}
           password: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
-          subject: "Neon DB Backup — ${{ github.repository }} run #${{ github.run_number }}"
+          subject: "❌ Neon DB Backup FAILED — ${{ github.repository }} run #${{ github.run_number }}"
           body: |
-            Neon DB Backup workflow finished (run #${{ github.run_number }}).
+            Neon DB Backup workflow failed (run #${{ github.run_number }}).
 
             Repository: ${{ github.repository }}
             Workflow: ${{ github.workflow }}
@@ -150,7 +149,7 @@ jobs:
             - upload step outcome: ${{ steps.upload.outcome }}
             - cleanup outcome:     ${{ steps.cleanup.outcome }}
 
-            Backup file: ${{ env.NOTIFY_BACKUP_FILE }}
+            Backup file (if any): ${{ env.NOTIFY_BACKUP_FILE }}
 
             Check full logs here: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
