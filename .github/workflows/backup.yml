@@ -2,8 +2,8 @@ name: Daily Neon DB Backup to R2
 
 on:
   schedule:
-    - cron: "0 3 * * *" # 毎日午前3時(JST12:00)に実行
-  workflow_dispatch: # 手動実行も可能
+    - cron: "0 3 * * *" # 毎日午前3時(JST)
+  workflow_dispatch:
 
 jobs:
   backup:
@@ -13,7 +13,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- PostgreSQL 17 client install ---
       - name: Install PostgreSQL 17 client
         run: |
           sudo apt-get update
@@ -24,7 +23,6 @@ jobs:
           sudo apt-get install -y postgresql-client-17
           pg_dump --version
 
-      # --- pg_dumpを使ってNeon DBをバックアップ ---
       - name: Dump Neon PostgreSQL database
         id: dump
         env:
@@ -39,7 +37,6 @@ jobs:
           FILE_NAME="backup_${TIMESTAMP}.sql.gz"
           echo "Creating backup file: $FILE_NAME"
 
-          # Neon DBへダンプ
           PGPASSWORD=$NEON_PASSWORD pg_dump \
             --host="$NEON_HOST" \
             --port=5432 \
@@ -50,16 +47,14 @@ jobs:
             --no-password \
           | gzip > "$FILE_NAME"
 
-          # ファイルサイズ確認（0バイトなら失敗扱い）
           if [ ! -s "$FILE_NAME" ]; then
-            echo "❌ Backup file is empty. Dump failed."
+            echo "❌ Backup file is empty. Dump failed." >&2
             exit 1
           fi
 
           echo "✅ Backup completed successfully: $FILE_NAME"
           echo "BACKUP_FILE=$FILE_NAME" >> $GITHUB_ENV
 
-      # --- AWS CLI v2 install ---
       - name: Install AWS CLI v2
         run: |
           curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
@@ -67,7 +62,6 @@ jobs:
           sudo ./aws/install --update
           aws --version
 
-      # --- R2へアップロード ---
       - name: Upload backup to R2
         id: upload
         env:
@@ -89,7 +83,6 @@ jobs:
 
           echo "✅ Backup uploaded to R2: backups/$BACKUP_FILE"
 
-      # --- 古いバックアップの削除（30日以上前） ---
       - name: Delete old backups (older than 30 days)
         id: cleanup
         env:
@@ -124,35 +117,44 @@ jobs:
 
           echo "✅ Old backup cleanup completed."
 
-      # ------------------------
-      # 成功・失敗に関わらず通知（Gmail SMTP）
-      # ------------------------
-　　  - name: Send notification email (Gmail SMTP)
- 　　　 if: always()
-　　　  uses: dawidd6/action-send-mail@v3
-　　　　with:
-    server_address: smtp.gmail.com
-    server_port: 465
-    username: ${{ secrets.ALERT_EMAIL_USERNAME }}
-    password: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
-    subject: "Neon DB Backup — ${{ github.repository }} run #${{ github.run_number }}"
-    body: |
-      Neon DB Backup workflow finished (run #${{ github.run_number }}).
+      # ---------- 通知用に表示するバックアップ名を整える ----------
+      - name: Prepare notification context
+        if: always()
+        run: |
+          # BACKUP_FILE が空／未定義なら "N/A" をセット
+          if [ -z "${BACKUP_FILE:-}" ]; then
+            echo "NOTIFY_BACKUP_FILE=N/A" >> $GITHUB_ENV
+          else
+            echo "NOTIFY_BACKUP_FILE=$BACKUP_FILE" >> $GITHUB_ENV
+          fi
 
-      Repository: ${{ github.repository }}
-      Workflow: ${{ github.workflow }}
-      Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # ---------- 成功・失敗に関わらず通知（Gmail SMTP） ----------
+      - name: Send notification email (Gmail SMTP)
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.ALERT_EMAIL_USERNAME }}
+          password: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
+          subject: "Neon DB Backup — ${{ github.repository }} run #${{ github.run_number }}"
+          body: |
+            Neon DB Backup workflow finished (run #${{ github.run_number }}).
 
-      Summary of important steps:
-      - dump step outcome:   ${{ steps.dump.outcome }}
-      - upload step outcome: ${{ steps.upload.outcome }}
-      - cleanup outcome:     ${{ steps.cleanup.outcome }}
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-      Backup file: ${{ env.BACKUP_FILE || 'N/A' }}
+            Summary of important steps:
+            - dump step outcome:   ${{ steps.dump.outcome }}
+            - upload step outcome: ${{ steps.upload.outcome }}
+            - cleanup outcome:     ${{ steps.cleanup.outcome }}
 
-      Check full logs here: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Backup file: ${{ env.NOTIFY_BACKUP_FILE }}
 
-      ※このメールは自動送信です。
-    to: ${{ secrets.ALERT_EMAIL_RECIPIENTS }}
-    from: ${{ secrets.ALERT_EMAIL_USERNAME }}
-    secure: true
+            Check full logs here: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            ※このメールは自動送信です。
+          to: ${{ secrets.ALERT_EMAIL_RECIPIENTS }}
+          from: ${{ secrets.ALERT_EMAIL_USERNAME }}
+          secure: true
