@@ -127,32 +127,32 @@ jobs:
       # ------------------------
       # 成功・失敗に関わらず通知（Gmail SMTP）
       # ------------------------
-      - name: Send notification email (Gmail SMTP)
-        if: always()              # ジョブの成功/失敗に関係なく実行する
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 587
-          username: ${{ secrets.ALERT_EMAIL_USERNAME }}
-          password: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
-          subject: "Neon DB Backup — ${{ github.repository }} run #${{ github.run_number }}"
-          body: |
-            Neon DB Backup workflow finished (run #${{ github.run_number }}).
+　　  - name: Send notification email (Gmail SMTP)
+ 　　　 if: always()
+　　　  uses: dawidd6/action-send-mail@v3
+　　　　with:
+    server_address: smtp.gmail.com
+    server_port: 465
+    username: ${{ secrets.ALERT_EMAIL_USERNAME }}
+    password: ${{ secrets.ALERT_EMAIL_APP_PASSWORD }}
+    subject: "Neon DB Backup — ${{ github.repository }} run #${{ github.run_number }}"
+    body: |
+      Neon DB Backup workflow finished (run #${{ github.run_number }}).
 
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.workflow }}
-            Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      Repository: ${{ github.repository }}
+      Workflow: ${{ github.workflow }}
+      Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            Summary of important steps:
-            - dump step outcome:   ${{ steps.dump.outcome }}
-            - upload step outcome: ${{ steps.upload.outcome }}
-            - cleanup outcome:     ${{ steps.cleanup.outcome }}
+      Summary of important steps:
+      - dump step outcome:   ${{ steps.dump.outcome }}
+      - upload step outcome: ${{ steps.upload.outcome }}
+      - cleanup outcome:     ${{ steps.cleanup.outcome }}
 
-            Backup file: ${{ env.BACKUP_FILE || 'N/A' }}
+      Backup file: ${{ env.BACKUP_FILE || 'N/A' }}
 
-            Check full logs here: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      Check full logs here: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            ※このメールは自動送信です。
-          to: ${{ secrets.ALERT_EMAIL_RECIPIENTS }}
-          from: ${{ secrets.ALERT_EMAIL_USERNAME }}
-          secure: true
+      ※このメールは自動送信です。
+    to: ${{ secrets.ALERT_EMAIL_RECIPIENTS }}
+    from: ${{ secrets.ALERT_EMAIL_USERNAME }}
+    secure: true
